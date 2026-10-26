@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -248,3 +250,182 @@ func TestPromptHydrationAPI(t *testing.T) {
 		t.Fatalf("expected master token to access secret bucket memories")
 	}
 }
+
+func TestBucketAndEntryManagementAPI(t *testing.T) {
+	router, _, _, masterToken := setupTestServer(t)
+
+	// 1. Add entry via POST /api/entries
+	addPayload := map[string]any{
+		"bucket":   "webshop",
+		"tier":     "semantic",
+		"subject":  "Catalog",
+		"content":  "Product catalog has 1500 items",
+		"metadata": map[string]any{"source": "seed"},
+	}
+	body, _ := json.Marshal(addPayload)
+	req, _ := http.NewRequest(http.MethodPost, "/api/entries", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var createdEntry MemoryDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &createdEntry); err != nil {
+		t.Fatalf("failed decoding created entry: %v", err)
+	}
+	if createdEntry.ID == 0 || createdEntry.Subject != "Catalog" {
+		t.Fatalf("invalid created entry: %+v", createdEntry)
+	}
+
+	// 2. List buckets via GET /api/buckets
+	req, _ = http.NewRequest(http.MethodGet, "/api/buckets", nil)
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for list buckets, got %d", rr.Code)
+	}
+	var buckets []BucketSummary
+	_ = json.Unmarshal(rr.Body.Bytes(), &buckets)
+	if len(buckets) != 1 || buckets[0].Bucket != "webshop" {
+		t.Fatalf("expected webshop bucket in summary, got: %+v", buckets)
+	}
+	if buckets[0].ActiveCount != 1 {
+		t.Fatalf("expected 1 active count, got %d", buckets[0].ActiveCount)
+	}
+
+	// 3. List entries via GET /api/buckets/webshop/entries
+	req, _ = http.NewRequest(http.MethodGet, "/api/buckets/webshop/entries", nil)
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for list entries, got %d", rr.Code)
+	}
+	var entryListResp struct {
+		Entries []MemoryDetail `json:"entries"`
+		Total   int64          `json:"total"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &entryListResp)
+	if entryListResp.Total != 1 || len(entryListResp.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got total=%d", entryListResp.Total)
+	}
+
+	// 4. Update entry via PUT /api/entries/{id}
+	updatePayload := map[string]any{
+		"subject": "Catalog Updated",
+		"content": "Product catalog has 1600 items",
+		"tier":    "core",
+	}
+	updateBody, _ := json.Marshal(updatePayload)
+	req, _ = http.NewRequest(http.MethodPut, fmt.Sprintf("/api/entries/%d", createdEntry.ID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for update entry, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var updatedEntry MemoryDetail
+	_ = json.Unmarshal(rr.Body.Bytes(), &updatedEntry)
+	if updatedEntry.Subject != "Catalog Updated" || updatedEntry.Tier != "core" {
+		t.Fatalf("expected updated subject and core tier, got: %+v", updatedEntry)
+	}
+
+	// 5. Delete entry via DELETE /api/entries/{id}
+	req, _ = http.NewRequest(http.MethodDelete, fmt.Sprintf("/api/entries/%d", createdEntry.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for delete entry, got %d", rr.Code)
+	}
+
+	// 6. Empty bucket via DELETE /api/buckets/webshop
+	req, _ = http.NewRequest(http.MethodDelete, "/api/buckets/webshop?permanent=true", nil)
+	req.Header.Set("Authorization", "Bearer "+masterToken)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for empty bucket, got %d", rr.Code)
+	}
+}
+
+func TestUIEmbeddedServerAndAuth(t *testing.T) {
+	router, _, _, masterToken := setupTestServer(t)
+
+	// 1. Visit /ui/<masterToken> -> redirects to /ui/ and sets cookie
+	req, _ := http.NewRequest(http.MethodGet, "/ui/"+masterToken, nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect for /ui/<token>, got %d", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/ui/" {
+		t.Fatalf("expected redirect to /ui/, got %s", loc)
+	}
+	cookies := rr.Result().Cookies()
+	var authCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "mem_master_token" {
+			authCookie = c
+			break
+		}
+	}
+	if authCookie == nil || authCookie.Value != masterToken {
+		t.Fatalf("expected mem_master_token cookie set with master token, got: %v", authCookie)
+	}
+
+	// 2. Visit /ui?token=<masterToken> -> redirects to /ui/ and sets cookie
+	req, _ = http.NewRequest(http.MethodGet, "/ui?token="+masterToken, nil)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect for /ui?token=..., got %d", rr.Code)
+	}
+
+	// 3. Visit /ui/ with cookie -> serves index.html
+	req, _ = http.NewRequest(http.MethodGet, "/ui/", nil)
+	req.AddCookie(authCookie)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /ui/, got %d", rr.Code)
+	}
+	html := rr.Body.String()
+	if !strings.Contains(html, "<app-root>") {
+		t.Fatalf("expected embedded index.html with <app-root>, got: %s", html)
+	}
+
+	// 4. Visit SPA subroute /ui/buckets -> serves index.html fallback
+	req, _ = http.NewRequest(http.MethodGet, "/ui/buckets", nil)
+	req.AddCookie(authCookie)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /ui/buckets SPA fallback, got %d", rr.Code)
+	}
+
+	// 5. Root / redirects to /ui/
+	req, _ = http.NewRequest(http.MethodGet, "/", nil)
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect for /, got %d", rr.Code)
+	}
+}
+

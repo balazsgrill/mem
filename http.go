@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -19,7 +20,7 @@ type ServerConfig struct {
 	BaseURL     string
 }
 
-// Router builds the complete HTTP handler including API, token management, prompt hydration, and SSE MCP.
+// Router builds the complete HTTP handler including API, token management, prompt hydration, SSE MCP, and embedded UI.
 func BuildRouter(
 	cfg ServerConfig,
 	tokenStore TokenStore,
@@ -55,13 +56,10 @@ func BuildRouter(
 		writeJSON(w, http.StatusOK, map[string]any{"status": "healthy", "service": "mem"})
 	})
 
-	// 2. Token Management API (Authenticated via Master Token)
+	// Master Auth Middleware (checks Bearer header, X-Master-Token, query param, or Cookie)
 	masterAuth := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			token := extractBearerToken(r)
-			if token == "" {
-				token = r.Header.Get("X-Master-Token")
-			}
+			token := extractMasterToken(r)
 			if !constantTimeCompare(token, cfg.MasterToken) {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: invalid master token"})
 				return
@@ -70,6 +68,7 @@ func BuildRouter(
 		}
 	}
 
+	// 2. Token Management API (Authenticated via Master Token)
 	// POST /api/tokens - Create Token
 	mux.HandleFunc("POST /api/tokens", masterAuth(func(w http.ResponseWriter, r *http.Request) {
 		var req AgentToken
@@ -170,13 +169,184 @@ func BuildRouter(
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	}))
 
-	// 3. Prompt-Time Extending Operation (Hydrate Prompt Context)
-	// Accessible via either Agent Token or Master Token
-	hydrateHandler := func(w http.ResponseWriter, r *http.Request) {
-		tokenStr := extractBearerToken(r)
-		if tokenStr == "" {
-			tokenStr = r.URL.Query().Get("token")
+	// 3. Bucket Management API (Master Auth)
+	// GET /api/buckets - List all buckets with statistics
+	mux.HandleFunc("GET /api/buckets", masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		summaries, err := memStore.ListBuckets(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
+		if summaries == nil {
+			summaries = []BucketSummary{}
+		}
+		writeJSON(w, http.StatusOK, summaries)
+	}))
+
+	// DELETE /api/buckets/{bucket} - Empty bucket
+	mux.HandleFunc("DELETE /api/buckets/{bucket}", masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		bucket := r.PathValue("bucket")
+		permanent := r.URL.Query().Get("permanent") == "true"
+		affected, err := memStore.EmptyBucket(r.Context(), bucket, permanent)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "emptied",
+			"bucket":   bucket,
+			"affected": affected,
+		})
+	}))
+
+	// 4. Memory Entry Management API (Master Auth)
+	// GET /api/entries & GET /api/buckets/{bucket}/entries
+	listEntriesHandler := masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		bucket := r.PathValue("bucket")
+		if bucket == "" {
+			bucket = r.URL.Query().Get("bucket")
+		}
+		tier := r.URL.Query().Get("tier")
+		q := r.URL.Query().Get("q")
+		includeSuperseded := r.URL.Query().Get("include_superseded") == "true"
+
+		limit := 50
+		if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 {
+			limit = l
+		}
+		offset := 0
+		if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+			offset = o
+		}
+
+		entries, total, err := memStore.ListEntries(r.Context(), bucket, tier, q, includeSuperseded, limit, offset)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if entries == nil {
+			entries = []MemoryDetail{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"entries": entries,
+			"total":   total,
+		})
+	})
+	mux.HandleFunc("GET /api/entries", listEntriesHandler)
+	mux.HandleFunc("GET /api/buckets/{bucket}/entries", listEntriesHandler)
+
+	// GET /api/entries/{id}
+	mux.HandleFunc("GET /api/entries/{id}", masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid entry id"})
+			return
+		}
+		entry, err := memStore.GetEntry(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, ErrMemoryNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "entry not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, entry)
+	}))
+
+	// POST /api/entries & POST /api/buckets/{bucket}/entries - Add entry
+	addEntryHandler := masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		type AddEntryRequest struct {
+			Bucket   string         `json:"bucket"`
+			Tier     string         `json:"tier"`
+			Subject  string         `json:"subject"`
+			Content  string         `json:"content"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		var req AddEntryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+
+		bucket := r.PathValue("bucket")
+		if bucket != "" {
+			req.Bucket = bucket
+		}
+
+		if req.Bucket == "" || req.Subject == "" || req.Content == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bucket, subject, and content are required"})
+			return
+		}
+
+		entry, err := memStore.AddEntry(r.Context(), req.Bucket, req.Tier, req.Subject, req.Content, req.Metadata)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, entry)
+	})
+	mux.HandleFunc("POST /api/entries", addEntryHandler)
+	mux.HandleFunc("POST /api/buckets/{bucket}/entries", addEntryHandler)
+
+	// PUT & PATCH /api/entries/{id} - Edit entry
+	editEntryHandler := masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid entry id"})
+			return
+		}
+
+		type EditEntryRequest struct {
+			Bucket   string         `json:"bucket"`
+			Tier     string         `json:"tier"`
+			Subject  string         `json:"subject"`
+			Content  string         `json:"content"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		var req EditEntryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+
+		entry, err := memStore.UpdateEntry(r.Context(), id, req.Bucket, req.Tier, req.Subject, req.Content, req.Metadata)
+		if err != nil {
+			if errors.Is(err, ErrMemoryNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "entry not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, entry)
+	})
+	mux.HandleFunc("PUT /api/entries/{id}", editEntryHandler)
+	mux.HandleFunc("PATCH /api/entries/{id}", editEntryHandler)
+
+	// DELETE /api/entries/{id} - Remove single entry
+	mux.HandleFunc("DELETE /api/entries/{id}", masterAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid entry id"})
+			return
+		}
+
+		permanent := r.URL.Query().Get("permanent") == "true"
+		if err := memStore.DeleteEntry(r.Context(), id, permanent); err != nil {
+			if errors.Is(err, ErrMemoryNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "entry not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
+	}))
+
+	// 5. Prompt-Time Extending Operation (Hydrate Prompt Context)
+	hydrateHandler := func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := extractMasterToken(r)
 
 		var (
 			allowedBuckets []string
@@ -213,12 +383,10 @@ func BuildRouter(
 			req.TopK = 5
 		}
 
-		// Bucket filtering
 		targetBuckets := allowedBuckets
 		if isMaster {
 			targetBuckets = req.Buckets
 		} else if len(req.Buckets) > 0 {
-			// Ensure requested buckets are within agent's read buckets
 			for _, b := range req.Buckets {
 				if !slices.Contains(allowedBuckets, b) {
 					writeJSON(w, http.StatusForbidden, map[string]string{
@@ -254,7 +422,7 @@ func BuildRouter(
 	mux.HandleFunc("POST /api/prompt/hydrate", hydrateHandler)
 	mux.HandleFunc("POST /api/hydrate", hydrateHandler)
 
-	// 4. SSE MCP Endpoints (Dynamic Authentication for Agents)
+	// 6. SSE MCP Endpoints (Dynamic Authentication for Agents)
 	sseAuthHandler := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenStr := extractBearerToken(r)
@@ -277,7 +445,6 @@ func BuildRouter(
 				return
 			}
 
-			// Pass authenticated agent token in context
 			ctx := WithAgentToken(r.Context(), agentTok)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -291,6 +458,14 @@ func BuildRouter(
 	mux.Handle("GET /mcp/sse", sseHandler)
 	mux.Handle("POST /mcp/message", msgHandler)
 
+	// 7. Embedded Web UI (/ui, /ui/<token>, /ui?token=<token>, SPA routing)
+	RegisterUIHandlers(mux, cfg)
+
+	// Redirect root / to /ui/
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
+
 	return mux
 }
 
@@ -302,6 +477,22 @@ func extractBearerToken(r *http.Request) string {
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 		return strings.TrimSpace(parts[1])
+	}
+	return ""
+}
+
+func extractMasterToken(r *http.Request) string {
+	if tok := extractBearerToken(r); tok != "" {
+		return tok
+	}
+	if tok := r.Header.Get("X-Master-Token"); tok != "" {
+		return strings.TrimSpace(tok)
+	}
+	if tok := r.URL.Query().Get("token"); tok != "" {
+		return strings.TrimSpace(tok)
+	}
+	if c, err := r.Cookie("mem_master_token"); err == nil && c.Value != "" {
+		return strings.TrimSpace(c.Value)
 	}
 	return ""
 }

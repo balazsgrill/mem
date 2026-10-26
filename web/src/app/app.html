@@ -1,0 +1,751 @@
+<!-- Toast Container -->
+<div class="toast-container">
+  @for (toast of toasts(); track toast.id) {
+    <div class="toast toast-{{ toast.type }}" (click)="removeToast(toast.id)">
+      <span class="toast-icon">
+        @if (toast.type === 'success') { ✓ }
+        @else if (toast.type === 'error') { ✕ }
+        @else { ℹ }
+      </span>
+      <span class="toast-message">{{ toast.message }}</span>
+    </div>
+  }
+</div>
+
+<!-- 1. LOGIN / TOKEN PROMPT (When unauthenticated) -->
+@if (!api.isAuthenticated()) {
+  <div class="auth-screen">
+    <div class="glass-panel auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">
+          <span class="logo-badge">MEM</span>
+        </div>
+        <h2>Agent Memory Core</h2>
+        <p class="auth-subtitle">Resident pgvector Memory & Dynamic MCP Management</p>
+      </div>
+
+      @if (authError()) {
+        <div class="alert alert-danger">
+          {{ authError() }}
+        </div>
+      }
+
+      <form (ngSubmit)="submitMasterToken()" class="auth-form">
+        <div class="form-group">
+          <label for="masterToken">Master Token</label>
+          <input
+            id="masterToken"
+            type="password"
+            placeholder="Enter configured master token..."
+            [(ngModel)]="masterTokenInput"
+            name="masterToken"
+            autocomplete="current-password"
+            autofocus
+            required
+          />
+          <span class="input-hint">Tip: Accessible directly via <code>/ui/&lt;master_token&gt;</code> or <code>/ui?token=&lt;token&gt;</code></span>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block" [disabled]="isAuthenticating()">
+          @if (isAuthenticating()) {
+            <span class="spinner"></span> Verifying...
+          } @else {
+            Connect to Control Plane →
+          }
+        </button>
+      </form>
+    </div>
+  </div>
+} @else {
+  <!-- 2. MAIN APPLICATION -->
+  <div class="app-layout">
+    <!-- Navbar Header -->
+    <header class="app-header glass-panel">
+      <div class="header-left">
+        <div class="brand">
+          <span class="brand-badge">MEM</span>
+          <div class="brand-text">
+            <span class="brand-title">Agent Memory</span>
+            <span class="brand-subtitle">Control Plane</span>
+          </div>
+        </div>
+
+        <nav class="nav-tabs">
+          <button
+            class="tab-btn"
+            [class.active]="activeTab() === 'buckets'"
+            (click)="activeTab.set('buckets')"
+          >
+            🗄️ Buckets & Memories
+          </button>
+          <button
+            class="tab-btn"
+            [class.active]="activeTab() === 'tokens'"
+            (click)="activeTab.set('tokens')"
+          >
+            🔑 Agent Tokens
+          </button>
+          <button
+            class="tab-btn"
+            [class.active]="activeTab() === 'sandbox'"
+            (click)="activeTab.set('sandbox')"
+          >
+            ⚡ Prompt Hydration
+          </button>
+        </nav>
+      </div>
+
+      <div class="header-right">
+        <div class="token-indicator" title="Authenticated with Master Token">
+          <span class="status-dot"></span>
+          <span class="token-preview">Master Active</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" (click)="logout()">
+          Logout
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="app-content">
+
+      <!-- ==================== TAB 1: BUCKETS & MEMORIES ==================== -->
+      @if (activeTab() === 'buckets') {
+        <div class="buckets-grid">
+          <!-- Sidebar: Buckets List -->
+          <aside class="sidebar-panel glass-panel">
+            <div class="sidebar-header">
+              <h3>Buckets</h3>
+              <button class="btn btn-primary btn-sm" (click)="openAddMemoryModal()">
+                + New Memory
+              </button>
+            </div>
+
+            <div class="search-box">
+              <input
+                type="text"
+                placeholder="Filter buckets..."
+                [(ngModel)]="bucketSearch"
+              />
+            </div>
+
+            <div class="bucket-list">
+              <div
+                class="bucket-item"
+                [class.active]="selectedBucket() === ''"
+                (click)="selectBucket('')"
+              >
+                <div class="bucket-item-content">
+                  <span class="bucket-name">All Buckets</span>
+                  <span class="bucket-meta">{{ buckets().length }} buckets</span>
+                </div>
+              </div>
+
+              @for (b of filteredBuckets(); track b.bucket) {
+                <div
+                  class="bucket-item"
+                  [class.active]="selectedBucket() === b.bucket"
+                  (click)="selectBucket(b.bucket)"
+                >
+                  <div class="bucket-item-content">
+                    <span class="bucket-name">{{ b.bucket }}</span>
+                    <div class="bucket-badges">
+                      <span class="badge badge-core" title="Pinned Core Memories">{{ b.core_count }} core</span>
+                      <span class="badge badge-semantic" title="Searchable Semantic Memories">{{ b.semantic_count }} semantic</span>
+                    </div>
+                  </div>
+                  <button
+                    class="btn-icon danger"
+                    title="Empty Bucket"
+                    (click)="$event.stopPropagation(); openEmptyBucketModal(b.bucket)"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              }
+
+              @if (filteredBuckets().length === 0) {
+                <div class="empty-state-small">No buckets found</div>
+              }
+            </div>
+          </aside>
+
+          <!-- Main Panel: Entries / Memories -->
+          <section class="entries-panel glass-panel">
+            <div class="panel-header">
+              <div class="panel-title-area">
+                <h2>
+                  @if (selectedBucket()) {
+                    Bucket: <span class="highlight">{{ selectedBucket() }}</span>
+                  } @else {
+                    All Memory Records
+                  }
+                </h2>
+                <span class="total-count">{{ totalEntries() }} entries</span>
+              </div>
+
+              <div class="panel-actions">
+                <button class="btn btn-primary" (click)="openAddMemoryModal(selectedBucket())">
+                  + Add Fact to {{ selectedBucket() || 'Bucket' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Filters Bar -->
+            <div class="filters-bar">
+              <div class="search-input-wrapper">
+                <input
+                  type="text"
+                  placeholder="Search memory subject or content..."
+                  [(ngModel)]="searchQuery"
+                  (keyup.enter)="loadEntries()"
+                />
+                <button class="btn btn-secondary btn-sm" (click)="loadEntries()">
+                  Search
+                </button>
+              </div>
+
+              <div class="filter-controls">
+                <select [(ngModel)]="filterTier" (change)="loadEntries()">
+                  <option value="">All Tiers</option>
+                  <option value="core">Core (Pinned)</option>
+                  <option value="semantic">Semantic (Searchable)</option>
+                </select>
+
+                <label class="checkbox-label">
+                  <input
+                    type="checkbox"
+                    [(ngModel)]="includeSuperseded"
+                    (change)="loadEntries()"
+                  />
+                  Show Superseded / Inactive
+                </label>
+              </div>
+            </div>
+
+            <!-- Memory Entries List -->
+            @if (isLoadingEntries()) {
+              <div class="loading-state">
+                <div class="spinner"></div> Loading memories...
+              </div>
+            } @else if (entries().length === 0) {
+              <div class="empty-state">
+                <div class="empty-icon">🗂️</div>
+                <h3>No memory records found</h3>
+                <p>Add facts into this bucket or adjust your search filters.</p>
+                <button class="btn btn-primary" (click)="openAddMemoryModal(selectedBucket())">
+                  + Add First Memory
+                </button>
+              </div>
+            } @else {
+              <div class="entries-list">
+                @for (entry of entries(); track entry.id) {
+                  <article class="entry-card" [class.superseded]="entry.valid_until">
+                    <div class="entry-card-header">
+                      <div class="entry-tags">
+                        <span class="entry-id">#{{ entry.id }}</span>
+                        <span class="badge" [class.badge-core]="entry.tier === 'core'" [class.badge-semantic]="entry.tier === 'semantic'">
+                          {{ entry.tier }}
+                        </span>
+                        <span class="chip-bucket">{{ entry.bucket }}</span>
+                        @if (entry.valid_until) {
+                          <span class="badge badge-danger">Superseded</span>
+                        }
+                      </div>
+
+                      <div class="entry-actions">
+                        <button class="btn btn-secondary btn-sm" (click)="openEditMemoryModal(entry)">
+                          ✏️ Edit
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          (click)="deleteMemory(entry.id, false)"
+                          [title]="entry.valid_until ? 'Already inactive' : 'Invalidate memory'"
+                        >
+                          ✕ Invalidate
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          (click)="deleteMemory(entry.id, true)"
+                          title="Permanently remove from database"
+                        >
+                          🗑️ Delete
+                        </button>
+                      </div>
+                    </div>
+
+                    <h4 class="entry-subject">{{ entry.subject }}</h4>
+                    <p class="entry-content">{{ entry.content }}</p>
+
+                    @if (entry.metadata && (entry.metadata | json) !== '{}') {
+                      <details class="metadata-details">
+                        <summary>Metadata</summary>
+                        <pre><code>{{ entry.metadata | json }}</code></pre>
+                      </details>
+                    }
+
+                    <div class="entry-footer">
+                      <span class="timestamp">Created: {{ entry.valid_from | date:'medium' }}</span>
+                      @if (entry.valid_until) {
+                        <span class="timestamp danger">Invalidated: {{ entry.valid_until | date:'medium' }}</span>
+                      }
+                      @if (entry.superseded_by) {
+                        <span class="superseded-link">Superseded by #{{ entry.superseded_by }}</span>
+                      }
+                    </div>
+                  </article>
+                }
+              </div>
+            }
+          </section>
+        </div>
+      }
+
+      <!-- ==================== TAB 2: AGENT TOKENS ==================== -->
+      @if (activeTab() === 'tokens') {
+        <section class="tokens-section glass-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Agent Access Tokens</h2>
+              <p class="panel-subtitle">Dynamic credentials with granular bucket read/write permissions for agents connecting via MCP SSE</p>
+            </div>
+            <button class="btn btn-primary" (click)="openCreateTokenModal()">
+              + Create Agent Token
+            </button>
+          </div>
+
+          @if (isLoadingTokens()) {
+            <div class="loading-state">
+              <div class="spinner"></div> Loading tokens...
+            </div>
+          } @else if (tokens().length === 0) {
+            <div class="empty-state">
+              <div class="empty-icon">🔑</div>
+              <h3>No agent tokens configured</h3>
+              <p>Create access tokens to allow AI agents to authenticate to the MCP SSE server.</p>
+              <button class="btn btn-primary" (click)="openCreateTokenModal()">
+                + Create First Token
+              </button>
+            </div>
+          } @else {
+            <div class="tokens-grid">
+              @for (tok of tokens(); track tok.token) {
+                <div class="token-card glass-panel" [class.revoked]="tok.revoked">
+                  <div class="token-card-header">
+                    <div class="agent-id-badge">
+                      <span class="agent-icon">🤖</span>
+                      <strong>{{ tok.agent_id }}</strong>
+                    </div>
+
+                    <div class="token-status">
+                      @if (tok.revoked) {
+                        <span class="badge badge-danger">Revoked</span>
+                      } @else {
+                        <span class="badge badge-success">Active</span>
+                      }
+                    </div>
+                  </div>
+
+                  @if (tok.description) {
+                    <p class="token-desc">{{ tok.description }}</p>
+                  }
+
+                  <div class="token-value-box">
+                    <code class="token-string">{{ tok.token }}</code>
+                    <button class="btn btn-secondary btn-sm" (click)="copyToClipboard(tok.token, 'Agent token')">
+                      📋 Copy
+                    </button>
+                  </div>
+
+                  <div class="permissions-block">
+                    <div class="perm-row">
+                      <span class="perm-label">Read Buckets:</span>
+                      <div class="chips-container">
+                        @for (rb of tok.read_buckets; track rb) {
+                          <span class="chip chip-read">
+                            {{ rb }}
+                          </span>
+                        }
+                        @if (tok.read_buckets.length === 0) {
+                          <span class="none-text">None (No read access)</span>
+                        }
+                      </div>
+                    </div>
+
+                    <div class="perm-row">
+                      <span class="perm-label">Write Buckets:</span>
+                      <div class="chips-container">
+                        @for (wb of tok.write_buckets; track wb) {
+                          <span class="chip chip-write">
+                            {{ wb }}
+                          </span>
+                        }
+                        @if (tok.write_buckets.length === 0) {
+                          <span class="none-text">None (Read-only)</span>
+                        }
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="token-card-footer">
+                    <span class="timestamp">Updated: {{ tok.updated_at | date:'short' }}</span>
+                    <div class="card-action-btns">
+                      <button class="btn btn-secondary btn-sm" (click)="openEditTokenModal(tok)">
+                        ✏️ Edit
+                      </button>
+                      <button
+                        class="btn btn-sm"
+                        [class.btn-danger]="!tok.revoked"
+                        [class.btn-primary]="tok.revoked"
+                        (click)="toggleTokenRevocation(tok)"
+                      >
+                        {{ tok.revoked ? 'Activate' : 'Revoke' }}
+                      </button>
+                      <button class="btn btn-danger btn-sm" (click)="deleteToken(tok.token, true)" title="Permanently delete">
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              }
+            </div>
+          }
+        </section>
+      }
+
+      <!-- ==================== TAB 3: PROMPT HYDRATION SANDBOX ==================== -->
+      @if (activeTab() === 'sandbox') {
+        <section class="sandbox-section glass-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Prompt Hydration Sandbox</h2>
+              <p class="panel-subtitle">Simulate what an LLM turn receives at prompt-time for allowed buckets (Core Pinned Facts + Reciprocal Rank Fusion Search)</p>
+            </div>
+          </div>
+
+          <div class="sandbox-grid">
+            <div class="sandbox-controls glass-panel">
+              <div class="form-group">
+                <label>Target Buckets</label>
+                <div class="bucket-checkboxes">
+                  @for (b of buckets(); track b.bucket) {
+                    <button
+                      type="button"
+                      class="chip-toggle"
+                      [class.active]="isSandboxBucketSelected(b.bucket)"
+                      (click)="toggleSandboxBucket(b.bucket)"
+                    >
+                      {{ b.bucket }} ({{ b.active_count }})
+                    </button>
+                  }
+                  @if (buckets().length === 0) {
+                    <span class="none-text">No buckets available</span>
+                  }
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>User Prompt / Query</label>
+                <textarea
+                  rows="3"
+                  [(ngModel)]="sandboxQuery"
+                  placeholder="Enter user query..."
+                ></textarea>
+              </div>
+
+              <div class="form-group">
+                <label>Top-K Semantic Matches</label>
+                <input type="number" min="1" max="20" [(ngModel)]="sandboxTopK" />
+              </div>
+
+              <button class="btn btn-primary btn-block" (click)="runSandbox()" [disabled]="isSandboxing()">
+                @if (isSandboxing()) {
+                  <span class="spinner"></span> Running Hybrid Search...
+                } @else {
+                  Hydrate Prompt Context ⚡
+                }
+              </button>
+            </div>
+
+            <div class="sandbox-results glass-panel">
+              @if (sandboxResult()) {
+                <div class="sandbox-output">
+                  <div class="output-block">
+                    <div class="output-header">
+                      <h4>Generated Prompt Context (Ready for LLM System Prompt)</h4>
+                      <button class="btn btn-secondary btn-sm" (click)="copyToClipboard(sandboxResult().prompt_context, 'Prompt context')">
+                        📋 Copy Markdown
+                      </button>
+                    </div>
+                    <pre class="markdown-preview"><code>{{ sandboxResult().prompt_context || '(No memories found for query and buckets)' }}</code></pre>
+                  </div>
+
+                  <div class="output-stats-grid">
+                    <div class="stat-card">
+                      <span class="stat-num">{{ sandboxResult().core?.length || 0 }}</span>
+                      <span class="stat-name">Core Facts (<1ms, pinned)</span>
+                    </div>
+                    <div class="stat-card">
+                      <span class="stat-num">{{ sandboxResult().recalled?.length || 0 }}</span>
+                      <span class="stat-name">Semantic Matches (RRF)</span>
+                    </div>
+                  </div>
+                </div>
+              } @else {
+                <div class="empty-state">
+                  <div class="empty-icon">⚡</div>
+                  <h3>Prompt Hydration Tester</h3>
+                  <p>Select buckets, type a question, and click Hydrate to preview the injected prompt context.</p>
+                </div>
+              }
+            </div>
+          </div>
+        </section>
+      }
+
+    </main>
+  </div>
+}
+
+<!-- ==================== MODALS ==================== -->
+
+<!-- 1. Add / Edit Memory Modal -->
+@if (isMemoryModalOpen()) {
+  <div class="modal-backdrop" (click)="isMemoryModalOpen.set(false)">
+    <div class="modal-content" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <h3>{{ isEditingMemory() ? 'Edit Memory Entry #' + memoryForm.id : 'Add New Memory Fact' }}</h3>
+        <button class="btn-icon" (click)="isMemoryModalOpen.set(false)">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="memBucket">Target Bucket *</label>
+          <input
+            id="memBucket"
+            type="text"
+            placeholder="e.g. homelab, agent_alice, webshop"
+            [(ngModel)]="memoryForm.bucket"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Memory Tier *</label>
+          <div class="radio-row">
+            <label class="radio-label">
+              <input type="radio" value="semantic" [(ngModel)]="memoryForm.tier" name="tier" />
+              <div>
+                <strong>Semantic</strong>
+                <span class="radio-desc">Searched dynamically using hybrid RRF</span>
+              </div>
+            </label>
+            <label class="radio-label">
+              <input type="radio" value="core" [(ngModel)]="memoryForm.tier" name="tier" />
+              <div>
+                <strong>Core Fact</strong>
+                <span class="radio-desc">Always pinned in prompt hydration (&lt;1ms)</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="memSubject">Subject / Topic Key *</label>
+          <input
+            id="memSubject"
+            type="text"
+            placeholder="e.g. DNS, UserPreferences, WifiPassword"
+            [(ngModel)]="memoryForm.subject"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="memContent">Content / Distilled Fact *</label>
+          <textarea
+            id="memContent"
+            rows="4"
+            placeholder="The specific fact or piece of information..."
+            [(ngModel)]="memoryForm.content"
+            required
+          ></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="memMeta">Metadata JSON (Optional)</label>
+          <textarea
+            id="memMeta"
+            rows="3"
+            placeholder='{"source": "user", "confidence": 0.95}'
+            [(ngModel)]="memoryForm.metadataStr"
+          ></textarea>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" (click)="isMemoryModalOpen.set(false)">Cancel</button>
+        <button class="btn btn-primary" (click)="saveMemory()">
+          {{ isEditingMemory() ? 'Update Memory' : 'Create Memory' }}
+        </button>
+      </div>
+    </div>
+  </div>
+}
+
+<!-- 2. Add / Edit Token Modal -->
+@if (isTokenModalOpen()) {
+  <div class="modal-backdrop" (click)="isTokenModalOpen.set(false)">
+    <div class="modal-content" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <h3>{{ isEditingToken() ? 'Edit Token: ' + tokenForm.agent_id : 'Create Agent Token' }}</h3>
+        <button class="btn-icon" (click)="isTokenModalOpen.set(false)">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="tokenAgentId">Agent ID *</label>
+          <input
+            id="tokenAgentId"
+            type="text"
+            placeholder="e.g. agent_alice, coding_bot, researcher"
+            [(ngModel)]="tokenForm.agent_id"
+            required
+          />
+        </div>
+
+        @if (!isEditingToken()) {
+          <div class="form-group">
+            <label for="tokenCustom">Custom Token String (Optional)</label>
+            <input
+              id="tokenCustom"
+              type="text"
+              placeholder="Leave blank to generate secure random mem_... token"
+              [(ngModel)]="tokenForm.token"
+            />
+          </div>
+        }
+
+        <div class="form-group">
+          <label for="tokenDesc">Description</label>
+          <input
+            id="tokenDesc"
+            type="text"
+            placeholder="Purpose or agent role description"
+            [(ngModel)]="tokenForm.description"
+          />
+        </div>
+
+        <!-- Read Buckets -->
+        <div class="form-group">
+          <label>Read Buckets (Accessible for search & prompt hydration)</label>
+          <div class="chip-input-group">
+            <input
+              type="text"
+              placeholder="Add bucket name and press Enter..."
+              [(ngModel)]="tokenForm.newReadBucket"
+              (keyup.enter)="addBucketToToken('read')"
+            />
+            <button type="button" class="btn btn-secondary btn-sm" (click)="addBucketToToken('read')">
+              Add
+            </button>
+          </div>
+
+          <div class="chips-container-edit">
+            @for (b of tokenForm.read_buckets; track b; let i = $index) {
+              <span class="chip chip-read">
+                {{ b }}
+                <span class="chip-remove" (click)="removeBucketFromToken('read', i)">×</span>
+              </span>
+            }
+          </div>
+
+          <!-- Quick pick from existing buckets -->
+          <div class="quick-pick">
+            <span class="quick-label">Existing buckets:</span>
+            @for (eb of buckets(); track eb.bucket) {
+              @if (!tokenForm.read_buckets.includes(eb.bucket)) {
+                <button type="button" class="btn-tag" (click)="addBucketToToken('read', eb.bucket)">
+                  + {{ eb.bucket }}
+                </button>
+              }
+            }
+          </div>
+        </div>
+
+        <!-- Write Buckets -->
+        <div class="form-group">
+          <label>Write Buckets (Agent can remember & invalidate facts here)</label>
+          <div class="chip-input-group">
+            <input
+              type="text"
+              placeholder="Add bucket name and press Enter..."
+              [(ngModel)]="tokenForm.newWriteBucket"
+              (keyup.enter)="addBucketToToken('write')"
+            />
+            <button type="button" class="btn btn-secondary btn-sm" (click)="addBucketToToken('write')">
+              Add
+            </button>
+          </div>
+
+          <div class="chips-container-edit">
+            @for (b of tokenForm.write_buckets; track b; let i = $index) {
+              <span class="chip chip-write">
+                {{ b }}
+                <span class="chip-remove" (click)="removeBucketFromToken('write', i)">×</span>
+              </span>
+            }
+          </div>
+
+          <div class="quick-pick">
+            <span class="quick-label">Existing buckets:</span>
+            @for (eb of buckets(); track eb.bucket) {
+              @if (!tokenForm.write_buckets.includes(eb.bucket)) {
+                <button type="button" class="btn-tag" (click)="addBucketToToken('write', eb.bucket)">
+                  + {{ eb.bucket }}
+                </button>
+              }
+            }
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" (click)="isTokenModalOpen.set(false)">Cancel</button>
+        <button class="btn btn-primary" (click)="saveToken()">
+          {{ isEditingToken() ? 'Update Token' : 'Generate Token' }}
+        </button>
+      </div>
+    </div>
+  </div>
+}
+
+<!-- 3. Empty Bucket Confirmation Modal -->
+@if (isEmptyBucketModalOpen()) {
+  <div class="modal-backdrop" (click)="isEmptyBucketModalOpen.set(false)">
+    <div class="modal-content" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <h3>Empty Bucket: {{ bucketToEmpty() }}</h3>
+        <button class="btn-icon" (click)="isEmptyBucketModalOpen.set(false)">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <p>Are you sure you want to empty all active memory facts in bucket <strong>{{ bucketToEmpty() }}</strong>?</p>
+
+        <div class="form-group" style="margin-top: 1rem;">
+          <label class="checkbox-label">
+            <input type="checkbox" [(ngModel)]="permanentEmpty" />
+            <strong>Permanently delete entries from database</strong> (Unchecked = soft invalidation with audit trail)
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" (click)="isEmptyBucketModalOpen.set(false)">Cancel</button>
+        <button class="btn btn-danger" (click)="confirmEmptyBucket()">
+          Confirm Empty Bucket
+        </button>
+      </div>
+    </div>
+  </div>
+}

@@ -6,6 +6,10 @@ dist/
 *.test
 *.prof
 
+# Node & Angular cache
+web/node_modules/
+web/.angular/
+
 # OS / Editor
 .DS_Store
 .idea/

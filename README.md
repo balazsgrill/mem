@@ -146,9 +146,96 @@ The application can be configured via environment variables or CLI flags:
 
 ---
 
+---
+
+## Web UI Control Plane
+
+The server embeds a rich, progressive **Angular** frontend directly inside the compiled binary.
+
+### Accessing the UI
+Access the control plane using your configured master token:
+```
+http://localhost:8080/ui/<MASTER_TOKEN>
+# or
+http://localhost:8080/ui?token=<MASTER_TOKEN>
+```
+If you visit `http://localhost:8080/ui/` directly, an authentication modal prompts for your master token. The session is preserved via cookie and localStorage.
+
+### UI Features
+1. **Buckets & Memory Management**:
+   - Directory of all buckets with live stats (active, core, semantic counts).
+   - Empty bucket action (soft invalidation or permanent wipe).
+   - Filter memories by search term, tier (Core vs Semantic), and superseded status.
+   - Add new memory facts with interactive metadata JSON editor.
+   - Edit existing memory facts (automatically recalculates vector embeddings).
+   - Invalidate or permanently delete individual memory facts.
+2. **Agent Token Management**:
+   - List active and revoked tokens with quick copy-to-clipboard.
+   - Create new tokens with custom or auto-generated token IDs.
+   - Add/remove read and write bucket permissions using interactive tags/chips.
+   - Toggle token revocation or delete permanently.
+3. **Prompt Hydration Sandbox**:
+   - Interactive tester to preview the exact system prompt context that an LLM receives at runtime.
+
+---
+
 ## HTTP REST API
 
-### 1. Token Management API
+All administrative endpoints can be authenticated with `Authorization: Bearer <MASTER_TOKEN>`, `X-Master-Token: <MASTER_TOKEN>`, `?token=<MASTER_TOKEN>`, or the `mem_master_token` cookie.
+
+### 1. Bucket Management API
+
+- **List Buckets**: `GET /api/buckets`
+  Returns array of bucket summaries with counts:
+  ```json
+  [
+    {
+      "bucket": "homelab",
+      "active_count": 14,
+      "core_count": 3,
+      "semantic_count": 11,
+      "total_count": 16
+    }
+  ]
+  ```
+
+- **Empty Bucket**: `DELETE /api/buckets/{bucket}?permanent=false`
+  Invalidates (or permanently deletes if `permanent=true`) all active memories in the specified bucket.
+
+### 2. Memory Entry Management API
+
+- **List Entries**: `GET /api/entries?bucket=homelab&tier=core&q=DNS&include_superseded=false&limit=50&offset=0`
+  (Also accessible via `GET /api/buckets/{bucket}/entries`).
+  Returns `{ "entries": [...], "total": 1 }`.
+
+- **Get Entry by ID**: `GET /api/entries/{id}`
+
+- **Add Entry**: `POST /api/entries` (or `POST /api/buckets/{bucket}/entries`)
+  ```json
+  {
+    "bucket": "homelab",
+    "tier": "semantic",
+    "subject": "Storage",
+    "content": "NFS storage pool mounted at /mnt/data",
+    "metadata": { "source": "admin" }
+  }
+  ```
+
+- **Update Entry**: `PUT /api/entries/{id}`
+  ```json
+  {
+    "subject": "Storage Updated",
+    "content": "NFS storage pool mounted at /mnt/storage",
+    "tier": "core"
+  }
+  ```
+
+- **Delete Entry**: `DELETE /api/entries/{id}?permanent=false`
+  Invalidates memory (or permanently deletes if `permanent=true`).
+
+---
+
+### 3. Token Management API
 All token management endpoints require: `Authorization: Bearer <MASTER_TOKEN>` or `X-Master-Token: <MASTER_TOKEN>`.
 
 #### Create an Agent Token
@@ -200,7 +287,7 @@ Response:
 
 ---
 
-### 2. Prompt Hydration API (Pre-Inference Extension)
+### 4. Prompt Hydration API (Pre-Inference Extension)
 `POST /api/prompt/hydrate` (or `/api/hydrate`)
 
 Can be authenticated with:
