@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.25'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # fully static: no CGO, so no cross-compiler needed for arm64
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w" -o mem-linux-${{ matrix.goarch }} .
+      # tagged release: each arch attaches its binary to the tag's release
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mem-linux-${{ matrix.goarch }}
+      # main branch: stage binaries for the rolling "latest" release
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem-linux-${{ matrix.goarch }}
+          path: mem-linux-${{ matrix.goarch }}
+
+  latest:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # named downloads place each file directly in dist/ (a bulk download
+      # would nest each artifact in its own subdirectory)
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem-linux-amd64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem-linux-arm64
+          path: dist
+      # rolling release: replaces same-named assets and moves the "latest"
+      # tag to this commit; prerelease so tagged releases stay "Latest"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "main @ ${{ github.sha }}"
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: Rolling build from main, refreshed on every commit.
+          files: dist/*

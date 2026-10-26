@@ -1,0 +1,12 @@
+# Binaries and build artifacts
+mem
+mem-linux-*
+dist/
+*.exe
+*.test
+*.prof
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
