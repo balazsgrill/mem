@@ -413,9 +413,46 @@ export class App implements OnInit {
   }
 
   copyToClipboard(text: string, label: string = 'Token') {
-    navigator.clipboard.writeText(text).then(() => {
-      this.showToast(`${label} copied to clipboard!`, 'info');
-    });
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(text).then(
+        () => this.showToast(`${label} copied to clipboard!`, 'info'),
+        () => this.fallbackCopyToClipboard(text, label)
+      );
+    } else {
+      this.fallbackCopyToClipboard(text, label);
+    }
+  }
+
+  private fallbackCopyToClipboard(text: string, label: string = 'Token') {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.top = '0';
+      textArea.style.left = '0';
+      textArea.style.width = '2em';
+      textArea.style.height = '2em';
+      textArea.style.padding = '0';
+      textArea.style.border = 'none';
+      textArea.style.outline = 'none';
+      textArea.style.boxShadow = 'none';
+      textArea.style.background = 'transparent';
+      textArea.setAttribute('readonly', '');
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      textArea.setSelectionRange(0, text.length);
+
+      const successful = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      if (successful) {
+        this.showToast(`${label} copied to clipboard!`, 'info');
+      } else {
+        this.showToast(`Failed to copy ${label}`, 'error');
+      }
+    } catch (err: any) {
+      this.showToast(`Failed to copy ${label}: ${err?.message || err}`, 'error');
+    }
   }
 
   // --- Prompt Sandbox ---

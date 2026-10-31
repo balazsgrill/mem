@@ -37,11 +37,29 @@ func BuildRouter(
 		server.WithMessageEndpoint("/message"),
 		server.WithAppendQueryToMessageEndpoint(),
 		server.WithBaseURL(cfg.BaseURL),
+		server.WithSSEDisableLocalhostProtection(true),
 		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			sessionID := r.URL.Query().Get("sessionId")
 			if sessionID != "" {
 				if t := registry.Get(sessionID); t != nil {
 					ctx = WithAgentToken(ctx, t)
+				}
+			}
+			return ctx
+		}),
+	)
+
+	streamableServer := server.NewStreamableHTTPServer(
+		mcpServer,
+		server.WithDisableLocalhostProtection(true),
+		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			tokenStr := extractBearerToken(r)
+			if tokenStr == "" {
+				tokenStr = r.URL.Query().Get("token")
+			}
+			if tokenStr != "" {
+				if agentTok, err := tokenStore.GetToken(ctx, tokenStr); err == nil && !agentTok.Revoked {
+					ctx = WithAgentToken(ctx, agentTok)
 				}
 			}
 			return ctx
@@ -422,9 +440,17 @@ func BuildRouter(
 	mux.HandleFunc("POST /api/prompt/hydrate", hydrateHandler)
 	mux.HandleFunc("POST /api/hydrate", hydrateHandler)
 
-	// 6. SSE MCP Endpoints (Dynamic Authentication for Agents)
-	sseAuthHandler := func(next http.Handler) http.Handler {
+	// 6. MCP Endpoints (Dynamic Authentication for Agents - SSE & Streamable HTTP)
+	mcpAuthHandler := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodOptions {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS, HEAD")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, *")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
 			tokenStr := extractBearerToken(r)
 			if tokenStr == "" {
 				tokenStr = r.URL.Query().Get("token")
@@ -450,13 +476,24 @@ func BuildRouter(
 		})
 	}
 
-	sseHandler := sseAuthHandler(sseServer.SSEHandler())
+	sseHandler := mcpAuthHandler(sseServer.SSEHandler())
 	msgHandler := sseServer.MessageHandler()
+	streamableHandler := mcpAuthHandler(streamableServer)
 
+	// SSE Transport (Legacy 2024 MCP)
 	mux.Handle("GET /sse", sseHandler)
 	mux.Handle("POST /message", msgHandler)
 	mux.Handle("GET /mcp/sse", sseHandler)
 	mux.Handle("POST /mcp/message", msgHandler)
+
+	// Streamable HTTP Transport (Modern 2025+ MCP)
+	mux.Handle("POST /sse", streamableHandler)
+	mux.Handle("POST /mcp", streamableHandler)
+	mux.Handle("GET /mcp", streamableHandler)
+	mux.Handle("DELETE /mcp", streamableHandler)
+	mux.Handle("POST /mcp/", streamableHandler)
+	mux.Handle("GET /mcp/", streamableHandler)
+	mux.Handle("DELETE /mcp/", streamableHandler)
 
 	// 7. Embedded Web UI (/ui, /ui/<token>, /ui?token=<token>, SPA routing)
 	RegisterUIHandlers(mux, cfg)

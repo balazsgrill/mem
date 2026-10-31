@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -428,3 +430,160 @@ func TestParallelMultiAgentSSE(t *testing.T) {
 		t.Fatalf("Alice should have found her memory, got: %s", aliceText)
 	}
 }
+
+func TestOfficialMCPClient(t *testing.T) {
+	handler, tokenStore, _, _ := setupTestServer(t)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	agentTok, err := tokenStore.CreateToken(ctx, AgentToken{
+		AgentID:      "official_client",
+		ReadBuckets:  []string{"homelab"},
+		WriteBuckets: []string{"homelab"},
+	})
+	if err != nil {
+		t.Fatalf("failed creating token: %v", err)
+	}
+
+	// Connect using SSEMCPClient with header auth
+	mcpClient, err := client.NewSSEMCPClient(
+		ts.URL+"/sse",
+		transport.WithHeaders(map[string]string{
+			"Authorization": "Bearer " + agentTok.Token,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed creating client: %v", err)
+	}
+	defer mcpClient.Close()
+
+	if err := mcpClient.Start(ctx); err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{
+		Name:    "test-client",
+		Version: "1.0.0",
+	}
+
+	initRes, err := mcpClient.Initialize(ctx, initReq)
+	if err != nil {
+		t.Fatalf("failed to initialize: %v", err)
+	}
+	t.Logf("Initialized server: %s %s", initRes.ServerInfo.Name, initRes.ServerInfo.Version)
+
+	toolsRes, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("failed to list tools: %v", err)
+	}
+	if len(toolsRes.Tools) == 0 {
+		t.Fatalf("expected tools, got 0")
+	}
+	t.Logf("Got %d tools", len(toolsRes.Tools))
+}
+
+func TestStreamableHTTPClient(t *testing.T) {
+	handler, tokenStore, _, _ := setupTestServer(t)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	agentTok, err := tokenStore.CreateToken(ctx, AgentToken{
+		AgentID:      "streamable_client",
+		ReadBuckets:  []string{"homelab"},
+		WriteBuckets: []string{"homelab"},
+	})
+	if err != nil {
+		t.Fatalf("failed creating token: %v", err)
+	}
+
+	mcpClient, err := client.NewStreamableHttpClient(
+		ts.URL+"/mcp",
+		transport.WithStreamableHTTPHost("mem.internal"),
+		transport.WithHTTPHeaders(map[string]string{
+			"Authorization": "Bearer " + agentTok.Token,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed creating streamable client: %v", err)
+	}
+	defer mcpClient.Close()
+
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "client", Version: "1.0"}
+	initRes, err := mcpClient.Initialize(ctx, initReq)
+	if err != nil {
+		t.Fatalf("Streamable Initialize failed: %v", err)
+	}
+	if initRes.ServerInfo.Name != "agent-memory" {
+		t.Fatalf("unexpected server info name: %s", initRes.ServerInfo.Name)
+	}
+
+	toolsRes, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("Streamable ListTools failed: %v", err)
+	}
+	if len(toolsRes.Tools) == 0 {
+		t.Fatalf("expected tools from streamable client, got 0")
+	}
+}
+
+func TestHostHeaderMemInternal(t *testing.T) {
+	handler, tokenStore, _, _ := setupTestServer(t)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	agentTok, err := tokenStore.CreateToken(ctx, AgentToken{
+		AgentID:      "test_agent",
+		ReadBuckets:  []string{"homelab"},
+		WriteBuckets: []string{"homelab"},
+	})
+	if err != nil {
+		t.Fatalf("failed creating token: %v", err)
+	}
+
+	mcpClient, err := client.NewSSEMCPClient(
+		ts.URL+"/sse?token="+agentTok.Token,
+		transport.WithHTTPHost("mem.internal"),
+	)
+	if err != nil {
+		t.Fatalf("failed creating client: %v", err)
+	}
+	defer mcpClient.Close()
+
+	if err := mcpClient.Start(ctx); err != nil {
+		t.Fatalf("Start failed with mem.internal Host: %v", err)
+	}
+
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "client", Version: "1.0"}
+	initRes, err := mcpClient.Initialize(ctx, initReq)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+	if initRes.ServerInfo.Name != "agent-memory" {
+		t.Fatalf("unexpected server info name: %s", initRes.ServerInfo.Name)
+	}
+
+	toolsRes, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		t.Fatalf("ListTools failed with mem.internal Host: %v", err)
+	}
+	if len(toolsRes.Tools) == 0 {
+		t.Fatalf("expected tools from mem.internal Host, got 0")
+	}
+}
+
+

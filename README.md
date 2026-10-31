@@ -333,11 +333,20 @@ Response:
 
 ---
 
-## Resident SSE MCP Server
+## Resident MCP Server (SSE & Streamable HTTP)
 
-The server acts as a resident MCP server implementing the Model Context Protocol over Server-Sent Events (SSE).
+The server acts as a resident MCP server implementing the Model Context Protocol supporting both **Streamable HTTP** (MCP 2025+) and **Server-Sent Events** (SSE, legacy MCP).
 
-### Connecting to SSE
+### 1. Connecting via Streamable HTTP (Recommended for modern MCP clients)
+Modern clients (e.g. Cursor, Claude, Antigravity) connect directly to `/mcp`:
+```http
+POST /mcp
+Authorization: Bearer <AGENT_TOKEN>
+Content-Type: application/json
+```
+*(Query parameter `?token=<AGENT_TOKEN>` is also supported).*
+
+### 2. Connecting via SSE
 Agents establish an SSE stream with their bearer token:
 ```
 GET /sse
