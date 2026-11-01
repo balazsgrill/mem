@@ -404,6 +404,9 @@ func TestUIEmbeddedServerAndAuth(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for /ui/, got %d", rr.Code)
 	}
+	if cc := rr.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+		t.Fatalf("expected Cache-Control to contain no-cache, got: %s", cc)
+	}
 	html := rr.Body.String()
 	if !strings.Contains(html, "<app-root>") {
 		t.Fatalf("expected embedded index.html with <app-root>, got: %s", html)

@@ -448,10 +448,14 @@ export class App implements OnInit {
       if (successful) {
         this.showToast(`${label} copied to clipboard!`, 'info');
       } else {
-        this.showToast(`Failed to copy ${label}`, 'error');
+        window.prompt(`Copy ${label} (Ctrl+C, Enter):`, text);
       }
     } catch (err: any) {
-      this.showToast(`Failed to copy ${label}: ${err?.message || err}`, 'error');
+      try {
+        window.prompt(`Copy ${label} (Ctrl+C, Enter):`, text);
+      } catch {
+        this.showToast(`Failed to copy ${label}: ${err?.message || err}`, 'error');
+      }
     }
   }
 
