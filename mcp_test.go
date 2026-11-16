@@ -586,4 +586,115 @@ func TestHostHeaderMemInternal(t *testing.T) {
 	}
 }
 
+func TestMCPCoreMemoriesPrompt(t *testing.T) {
+	handler, tokenStore, memStore, _ := setupTestServer(t)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Seed core and semantic memories in allowed and disallowed buckets
+	if _, err := memStore.RememberFact(ctx, []string{"homelab", "work", "secret"}, "homelab", "core", "DNS", "Pi-hole at 192.168.1.5", nil, nil); err != nil {
+		t.Fatalf("failed seeding homelab core memory: %v", err)
+	}
+	if _, err := memStore.RememberFact(ctx, []string{"homelab", "work", "secret"}, "work", "core", "VPN", "WireGuard on port 51820", nil, nil); err != nil {
+		t.Fatalf("failed seeding work core memory: %v", err)
+	}
+	if _, err := memStore.RememberFact(ctx, []string{"homelab", "work", "secret"}, "homelab", "semantic", "NAS", "Synology at 192.168.1.10", nil, nil); err != nil {
+		t.Fatalf("failed seeding homelab semantic memory: %v", err)
+	}
+	if _, err := memStore.RememberFact(ctx, []string{"homelab", "work", "secret"}, "secret", "core", "RootKey", "Top secret key", nil, nil); err != nil {
+		t.Fatalf("failed seeding secret core memory: %v", err)
+	}
+
+	agentTok, err := tokenStore.CreateToken(ctx, AgentToken{
+		AgentID:      "prompt_agent",
+		ReadBuckets:  []string{"homelab", "work"},
+		WriteBuckets: []string{"homelab"},
+	})
+	if err != nil {
+		t.Fatalf("failed creating token: %v", err)
+	}
+
+	mcpClient, err := client.NewStreamableHttpClient(
+		ts.URL+"/mcp",
+		transport.WithHTTPHeaders(map[string]string{
+			"Authorization": "Bearer " + agentTok.Token,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed creating streamable client: %v", err)
+	}
+	defer mcpClient.Close()
+
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "prompt-client", Version: "1.0"}
+	if _, err := mcpClient.Initialize(ctx, initReq); err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	// 1. ListPrompts should expose core_memories
+	promptsRes, err := mcpClient.ListPrompts(ctx, mcp.ListPromptsRequest{})
+	if err != nil {
+		t.Fatalf("ListPrompts failed: %v", err)
+	}
+	if len(promptsRes.Prompts) != 1 || promptsRes.Prompts[0].Name != "core_memories" {
+		t.Fatalf("expected core_memories prompt, got: %+v", promptsRes.Prompts)
+	}
+
+	// 2. GetPrompt without bucket returns core memories from all allowed read buckets
+	getReq := mcp.GetPromptRequest{}
+	getReq.Params.Name = "core_memories"
+	promptRes, err := mcpClient.GetPrompt(ctx, getReq)
+	if err != nil {
+		t.Fatalf("GetPrompt failed: %v", err)
+	}
+	if len(promptRes.Messages) != 1 {
+		t.Fatalf("expected 1 prompt message, got %d", len(promptRes.Messages))
+	}
+	tc, ok := promptRes.Messages[0].Content.(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", promptRes.Messages[0].Content)
+	}
+	if !strings.Contains(tc.Text, "Pi-hole at 192.168.1.5") || !strings.Contains(tc.Text, "WireGuard on port 51820") {
+		t.Fatalf("expected both homelab and work core memories in prompt, got: %s", tc.Text)
+	}
+	if strings.Contains(tc.Text, "Synology") {
+		t.Fatalf("did not expect semantic memory in core_memories prompt, got: %s", tc.Text)
+	}
+	if strings.Contains(tc.Text, "Top secret key") {
+		t.Fatalf("did not expect unauthorized bucket core memory in prompt, got: %s", tc.Text)
+	}
+
+	// 3. GetPrompt filtered to specific allowed bucket ("homelab")
+	getFilteredReq := mcp.GetPromptRequest{}
+	getFilteredReq.Params.Name = "core_memories"
+	getFilteredReq.Params.Arguments = map[string]string{"bucket": "homelab"}
+	filteredRes, err := mcpClient.GetPrompt(ctx, getFilteredReq)
+	if err != nil {
+		t.Fatalf("GetPrompt with bucket=homelab failed: %v", err)
+	}
+	filteredTC, ok := filteredRes.Messages[0].Content.(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", filteredRes.Messages[0].Content)
+	}
+	if !strings.Contains(filteredTC.Text, "Pi-hole at 192.168.1.5") {
+		t.Fatalf("expected homelab core memory, got: %s", filteredTC.Text)
+	}
+	if strings.Contains(filteredTC.Text, "WireGuard") {
+		t.Fatalf("did not expect work core memory when filtered by bucket=homelab, got: %s", filteredTC.Text)
+	}
+
+	// 4. GetPrompt for unauthorized bucket ("secret") returns error
+	getUnauthReq := mcp.GetPromptRequest{}
+	getUnauthReq.Params.Name = "core_memories"
+	getUnauthReq.Params.Arguments = map[string]string{"bucket": "secret"}
+	if _, err := mcpClient.GetPrompt(ctx, getUnauthReq); err == nil {
+		t.Fatalf("expected permission denied error when requesting unauthorized bucket prompt")
+	}
+}
+
+
 

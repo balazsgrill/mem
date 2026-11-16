@@ -73,8 +73,54 @@ func BuildMCPServer(memStore MemoryStore, registry *SessionRegistry) *server.MCP
 		"1.0.0",
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true),
+		server.WithPromptCapabilities(true),
 		server.WithHooks(hooks),
 	)
+
+	// Prompt: core_memories
+	corePrompt := mcp.NewPrompt("core_memories",
+		mcp.WithPromptDescription("Retrieve all active pinned core memories formatted as prompt context for the agent's allowed read buckets"),
+		mcp.WithArgument("bucket",
+			mcp.ArgumentDescription("Optional specific bucket to filter core memories. Must be in agent's read_buckets"),
+		),
+	)
+	mcpServer.AddPrompt(corePrompt, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		token := resolveAgentToken(ctx, registry)
+		if token == nil {
+			return nil, fmt.Errorf("unauthorized: missing or invalid agent session credentials")
+		}
+		if token.Revoked {
+			return nil, fmt.Errorf("unauthorized: agent token has been revoked")
+		}
+
+		bucket := strings.TrimSpace(req.Params.Arguments["bucket"])
+		var allowed []string
+		if bucket != "" {
+			if !slices.Contains(token.ReadBuckets, bucket) {
+				return nil, fmt.Errorf("permission denied: agent cannot read from bucket %q", bucket)
+			}
+			allowed = []string{bucket}
+		} else {
+			allowed = token.ReadBuckets
+		}
+
+		records, err := memStore.GetCoreMemories(ctx, allowed)
+		if err != nil {
+			return nil, fmt.Errorf("failed retrieving core memories: %w", err)
+		}
+
+		promptText := memStore.FormatPromptContext(records, nil)
+		if strings.TrimSpace(promptText) == "" {
+			promptText = "### Core Memory Facts\nNo active core memories found."
+		}
+
+		return mcp.NewGetPromptResult(
+			"Active pinned core memories",
+			[]mcp.PromptMessage{
+				mcp.NewPromptMessage(mcp.RoleUser, mcp.NewTextContent(promptText)),
+			},
+		), nil
+	})
 
 	// Tool 1: search_memory
 	searchTool := mcp.NewTool("search_memory",

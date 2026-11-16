@@ -393,6 +393,12 @@ Fetches all active pinned core facts for the agent's read buckets.
 Invalidates an active memory fact by ID.
 - `id` *(number, required)*: The memory ID to invalidate (must belong to a writable bucket).
 
+### Exposed MCP Prompts
+
+#### 1. `core_memories`
+Returns all active pinned core memories formatted as Markdown prompt context for the agent's allowed read buckets.
+- `bucket` *(string, optional)*: Optional specific bucket to filter core memories (must be within `read_buckets`).
+
 ---
 
 ## Build and Run
